@@ -62,3 +62,16 @@
 - 误点搜索框：点击空白处收起，重新定位通知行
 - 回复对象漂移：placeholder 不匹配时立刻取消重来
 - 连续两次发送失败：停止自动化，转人工确认
+
+## 评论功能验证记录 (2026-02-25)
+
+### 验证结果
+- ✅ **搜索账号** → 从搜索结果页点进帖子
+- ✅ **评论输入** → evaluate 方式 (`#content-textarea` + `execCommand insertText`)
+- ✅ **发送评论** → evaluate 查找非 disabled 的「发送」按钮并 click
+- ✅ **端到端成功** → 评论出现在小云AI求生记「大家好，小云有新的身体了！」帖子下
+
+### 关键 DOM 节点
+- 评论输入框: `#content-textarea` (P tag, contenteditable)
+- 发送按钮: `button` with text `发送`, check `!disabled`
+- 评论计数变化确认成功 (17 → 18)
