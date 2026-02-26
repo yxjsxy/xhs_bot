@@ -520,8 +520,17 @@ async def _do_reply_on_page(page, comment_text: str, body: str) -> dict:
 
     await page.wait_for_timeout(1500)
 
-    # 输入回复内容
+    # 输入回复内容 — 优先使用验证过的 #content-textarea + execCommand
     typed = await page.evaluate("""(text) => {
+        // 方法1: 验证过的 #content-textarea (2026-02-25)
+        const ct = document.querySelector('#content-textarea');
+        if (ct) {
+            ct.focus();
+            ct.textContent = '';
+            document.execCommand('insertText', false, text);
+            if (ct.textContent.includes(text.slice(0, 10))) return {typed: true, method: "content-textarea"};
+        }
+        // 方法2: 回复框可能用不同的 placeholder
         const inputs = document.querySelectorAll(
             'textarea, [contenteditable="true"], input[type="text"], [placeholder*="回复"]'
         );
@@ -529,6 +538,10 @@ async def _do_reply_on_page(page, comment_text: str, body: str) -> dict:
             const rect = el.getBoundingClientRect();
             if (rect.height > 0 && rect.width > 0) {
                 el.focus();
+                el.textContent = '';
+                document.execCommand('insertText', false, text);
+                if (el.textContent.includes(text.slice(0, 10))) return {typed: true, method: "fallback_contenteditable"};
+                // textarea/input fallback
                 if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
                     const setter = Object.getOwnPropertyDescriptor(
                         window.HTMLTextAreaElement.prototype, 'value'
@@ -538,11 +551,8 @@ async def _do_reply_on_page(page, comment_text: str, body: str) -> dict:
                     if (setter) setter.call(el, text);
                     else el.value = text;
                     el.dispatchEvent(new Event('input', {bubbles: true}));
-                } else {
-                    el.textContent = text;
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    return {typed: true, method: "fallback_setter"};
                 }
-                return {typed: true};
             }
         }
         return {typed: false};
@@ -765,6 +775,79 @@ async def cmd_auto_reply(note_id: str, confirm: bool, persona_path: str,
         await pw.stop()
 
 
+# ─── Post new top-level comment (verified 2026-02-25) ───
+
+async def cmd_post_comment(note_id: str, body: str, confirm: bool):
+    """在指定笔记下发表新评论（非回复）。"""
+
+    if not confirm:
+        print(json.dumps({
+            "ok": True,
+            "status": "preview",
+            "note_id": note_id,
+            "comment": body,
+            "message": "Pass --confirm to actually post."
+        }, ensure_ascii=False, indent=2))
+        return
+
+    pw, browser = await connect_browser()
+    try:
+        page = await get_page(browser)
+        await inject_stealth(page)
+
+        url = f"https://www.xiaohongshu.com/explore/{note_id}"
+        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        await page.wait_for_timeout(3000)
+
+        # 输入评论 — 使用验证过的 #content-textarea + execCommand
+        typed = await page.evaluate("""(text) => {
+            const el = document.querySelector('#content-textarea');
+            if (!el) return {ok: false, error: "content-textarea not found"};
+            el.focus();
+            el.textContent = '';
+            document.execCommand('insertText', false, text);
+            const success = el.textContent.includes(text.slice(0, 10));
+            return {ok: success, text: el.textContent.slice(0, 50)};
+        }""", body)
+
+        if not typed.get("ok"):
+            print(json.dumps({"ok": False, "error": "Failed to type comment", "detail": typed}))
+            sys.exit(3)
+
+        await page.wait_for_timeout(800)
+
+        # 点击发送按钮
+        sent = await page.evaluate("""() => {
+            const btns = [...document.querySelectorAll('button')];
+            const btn = btns.find(b => b.textContent.trim() === '发送' && !b.disabled);
+            if (btn) { btn.click(); return {sent: true}; }
+            return {sent: false, disabled_found: btns.some(b => b.textContent.trim() === '发送')};
+        }""")
+
+        await page.wait_for_timeout(3000)
+
+        if sent.get("sent"):
+            print(json.dumps({
+                "ok": True,
+                "status": "posted",
+                "note_id": note_id,
+                "comment": body
+            }, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps({
+                "ok": False,
+                "error": "Send button not found or disabled",
+                "detail": sent
+            }))
+            sys.exit(3)
+
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        sys.exit(3)
+    finally:
+        await pw.stop()
+
+
 # ─── Main ───
 
 def main():
@@ -786,6 +869,12 @@ def main():
     p.add_argument("--body", required=True, help="回复内容")
     p.add_argument("--confirm", action="store_true")
 
+    # comment (发表新评论)
+    p = subparsers.add_parser("comment", help="在笔记下发表新评论")
+    p.add_argument("--note-id", required=True, help="笔记 ID")
+    p.add_argument("--body", required=True, help="评论内容")
+    p.add_argument("--confirm", action="store_true", help="确认发送（不传则只预览）")
+
     # auto-reply (核心功能)
     p = subparsers.add_parser("auto-reply", help="自动回复所有未回复评论")
     p.add_argument("--note-id", required=True, help="笔记 ID")
@@ -805,6 +894,8 @@ def main():
         asyncio.run(cmd_notifications())
     elif args.command == "reply":
         asyncio.run(cmd_reply_single(args.note_id, args.comment_text, args.body, args.confirm))
+    elif args.command == "comment":
+        asyncio.run(cmd_post_comment(args.note_id, args.body, args.confirm))
     elif args.command == "auto-reply":
         asyncio.run(cmd_auto_reply(
             note_id=args.note_id,
